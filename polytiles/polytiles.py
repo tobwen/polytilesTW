@@ -44,7 +44,7 @@ def format2ext(format):
     return ext
 
 
-class GoogleProjection:
+class WebMercatorProjection:
     def __init__(self, levels=22):
         self.Bc = []
         self.Cc = []
@@ -302,7 +302,7 @@ class RenderTask:
         self.mty0 = y - y % metatile
         self._tiles = set()
         # projects between tile pixel coordinates and LatLong (EPSG:4326)
-        self.tileproj = GoogleProjection()
+        self.tileproj = WebMercatorProjection()
 
     def add(self, x, y):
         if self.belongs(x, y):
@@ -459,7 +459,7 @@ class PolyGenerator:
         return self.poly.intersects(tt_p)
 
     def generate(self, queue):
-        self.gprj = GoogleProjection(self.zooms[-1] + 1)
+        self.gprj = WebMercatorProjection(self.zooms[-1] + 1)
 
         bbox = self.poly.bounds
         ll0 = (bbox[0], bbox[3])
