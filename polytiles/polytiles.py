@@ -12,12 +12,6 @@ from shapely.geometry import Polygon
 from shapely.wkb import loads
 
 try:
-    import psycopg2
-    HAS_PSYCOPG = True
-except ImportError:
-    HAS_PSYCOPG = False
-
-try:
     import sqlite3
     HAS_SQLITE = True
 except ImportError:
@@ -556,36 +550,6 @@ def poly_parse(fp):
     return result
 
 
-def read_db(db, osm_id=0):
-    # zero for DB bbox
-    cur = db.cursor()
-    if osm_id:
-        cur.execute("SELECT ST_Transform(way, 4326) FROM planet_osm_polygon WHERE osm_id = %s;", (osm_id,))
-    else:
-        cur.execute("SELECT ST_Transform(ST_ConvexHull(ST_Collect(way)), 4326) FROM planet_osm_polygon;")
-    way = cur.fetchone()[0]
-    cur.close()
-    return loads(way.decode("hex"))
-
-
-def read_cities(db, osm_id=0):
-    cur = db.cursor()
-    if osm_id:
-        cur.execute("SELECT ST_Transform(ST_Union(pl.way), 4326) FROM planet_osm_polygon pl, planet_osm_polygon b WHERE b.osm_id = %s AND pl.place IN ('town', 'city') AND ST_Area(pl.way) < 500*1000*1000 AND ST_Contains(b.way, pl.way);", (osm_id,))
-    else:
-        cur.execute("SELECT ST_Transform(ST_Union(way), 4326) FROM planet_osm_polygon WHERE place IN ('town', 'city') AND ST_Area(way) < 500*1000*1000;")
-    result = cur.fetchone()
-    poly = loads(result[0].decode("hex")) if result else Polygon()
-    if osm_id:
-        cur.execute("SELECT ST_Transform(ST_Union(ST_Buffer(p.way, 5000)), 4326) FROM planet_osm_point p, planet_osm_polygon b WHERE b.osm_id=%s AND ST_Contains(b.way, p.way) AND p.place IN ('town', 'city') AND NOT EXISTS(SELECT 1 FROM planet_osm_polygon pp WHERE pp.name=p.name AND ST_Contains(pp.way, p.way));", (osm_id,))
-    else:
-        cur.execute("SELECT ST_Transform(ST_Union(ST_Buffer(p.way, 5000)), 4326) FROM planet_osm_point p WHERE p.place in ('town', 'city') AND NOT EXISTS(SELECT 1 FROM planet_osm_polygon pp WHERE pp.name=p.name AND ST_Contains(pp.way, p.way));")
-    result = cur.fetchone()
-    if result:
-        poly = poly.union(loads(result[0].decode("hex")))
-    return poly
-
-
 def main():
     try:
         mapfile = os.environ["MAPNIK_MAP_FILE"]
@@ -593,13 +557,10 @@ def main():
         mapfile = os.getcwd() + "/osm.xml"
     default_user = getpass.getuser()
 
-    parser = argparse.ArgumentParser(description="Generate mapnik tiles for an OSM polygon")
+    parser = argparse.ArgumentParser(description="Generate XYZ/TMS tiles using Mapnik")
     apg_input = parser.add_argument_group("Input")
     apg_input.add_argument("-b", "--bbox", nargs=4, type=float, metavar=("X1", "Y1", "X2", "Y2"), help="generate tiles inside a bounding box")
     apg_input.add_argument("-p", "--poly", type=argparse.FileType("r"), help="use a poly file for area")
-    if HAS_PSYCOPG:
-        apg_input.add_argument("-a", "--area", type=int, metavar="OSM_ID", help="generate tiles inside an OSM polygon: positive for polygons, negative for relations, 0 for whole database")
-        apg_input.add_argument("-c", "--cities", type=int, metavar="OSM_ID", help="generate tiles for all towns inside a polygon")
     apg_input.add_argument("-l", "--list", type=argparse.FileType("r"), metavar="TILES.LST", help="process tile list")
     apg_output = parser.add_argument_group("Output")
     apg_output.add_argument("-t", "--tiledir", metavar="DIR", help="output tiles to directory (default: {0}/tiles)".format(os.getcwd()))
@@ -620,19 +581,9 @@ def main():
     apg_other.add_argument("--fonts", help="directory with custom fonts for the style")
     apg_other.add_argument("--for-renderd", action="store_true", default=False, help="produce only a single tile for metatiles")
     apg_other.add_argument("-q", "--quiet", dest="verbose", action="store_false", help="do not print any information", default=True)
-    if HAS_PSYCOPG:
-        apg_db = parser.add_argument_group("Database (for poly/cities)")
-        apg_db.add_argument("-d", "--dbname", metavar="DB", help="database (default: gis)", default="gis")
-        apg_db.add_argument("--host", help="database host", default=None)
-        apg_db.add_argument("--port", type=int, help="database port", default="5432")
-        apg_db.add_argument("-u", "--user", help="user name for db (default: {0})".format(default_user), default=default_user)
-        apg_db.add_argument("-w", "--password", action="store_true", help="ask for password", default=False)
     options = parser.parse_args()
 
     # check for required argument
-    if not options.bbox and not options.poly and (not HAS_PSYCOPG or (not options.cities and not options.area)) and not options.list:
-        parser.print_help()
-        sys.exit(1)
     if options.verbose:
         log_level = logging.INFO
     else:
@@ -659,22 +610,6 @@ def main():
     if options.poly:
         tpoly = poly_parse(options.poly)
         poly = tpoly if not poly else poly.intersection(tpoly)
-    if HAS_PSYCOPG and (options.area or options.cities):
-        passwd = None
-        if options.password:
-            passwd = getpass.getpass("Please enter your password: ")
-        try:
-            db = psycopg2.connect(database=options.dbname, user=options.user, password=passwd, host=options.host, port=options.port)
-            if options.area:
-                tpoly = read_db(db, options.area)
-                poly = tpoly if not poly else poly.intersection(tpoly)
-            if options.cities:
-                tpoly = read_cities(db, options.cities)
-                poly = tpoly if not poly else poly.intersection(tpoly)
-            db.close()
-        except Exception as e:
-            logging.error("Error connecting to database: %s", e.pgerror or e)
-            sys.exit(3)
     if options.list:
         generator = ListGenerator(options.list, metatile=options.meta)
     elif poly:
