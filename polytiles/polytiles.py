@@ -104,9 +104,10 @@ class ListWriter:
 
 
 class FileWriter:
-    def __init__(self, tile_dir, format="png256", tms=False, overwrite=True):
+    def __init__(self, tile_dir, format="png256", tms=False, overwrite=True, skipEmpty=True):
         self.format = format
         self.overwrite = overwrite
+        self.skipEmpty = skipEmpty
         self.tms = tms
         self.tile_dir = tile_dir
         if not self.tile_dir.endswith("/"):
@@ -132,8 +133,15 @@ class FileWriter:
             os.makedirs(os.path.dirname(uri))
         except OSError:
             pass
-        if self.overwrite or not os.path.exists(uri):
-            image.save(uri, self.format)
+
+        if self.skipEmpty:
+            skip = CheckImage(image).empty()
+        else:
+            skip = False
+
+        if not skip:
+            if self.overwrite or not os.path.exists(uri):
+                image.save(uri, self.format)
 
     @staticmethod
     def need_image():
@@ -149,9 +157,10 @@ class FileWriter:
 
 # https://github.com/mapbox/mbutil/blob/master/mbutil/util.py
 class MBTilesWriter:
-    def __init__(self, filename, setname, overlay=False, version=1, description=None, format="png256"):
+    def __init__(self, filename, setname, overlay=False, version=1, description=None, format="png256", skipEmpty=True):
         self.format = format
         self.filename = filename
+        self.skipEmpty = skipEmpty
         if not self.filename.endswith(".mbtiles"):
             self.filename = self.filename + ".mbtiles"
         self.con = sqlite3.connect(self.filename, isolation_level=None)
@@ -192,8 +201,14 @@ class MBTilesWriter:
         return self.cur.fetchone()
 
     def write(self, x, y, z, image):
-        query = "INSERT OR REPLACE INTO tiles (zoom_level, tile_column, tile_row, tile_data) values (?, ?, ?, ?);"
-        self.cur.execute(query, (z, x, 2**z - 1 - y, sqlite3.Binary(image.tostring(self.format))))
+        if self.skipEmpty:
+            skip = CheckImage(image).empty()
+        else:
+            skip = False
+
+        if not skip:
+            query = "INSERT OR REPLACE INTO tiles (zoom_level, tile_column, tile_row, tile_data) values (?, ?, ?, ?);"
+            self.cur.execute(query, (z, x, 2**z - 1 - y, sqlite3.Binary(image.tostring(self.format))))
 
     @staticmethod
     def need_image():
@@ -211,9 +226,21 @@ class MBTilesWriter:
         self.con.close()
 
 
+class CheckImage:
+    def __init__(self, image):
+        self.image = image
+
+    def empty(self):
+        if isinstance(self.image, mapnik._mapnik.Image):
+            return not any(self.image.tostring())
+        else:
+            return not self.image.empty
+
+
 class FakeImage:
     def __init__(self, image, format):
         self.imgstr = image.tostring(format)
+        self.empty = any(image.tostring())
 
     def tostring(self, format):
         return self.imgstr
@@ -229,6 +256,7 @@ class ThreadedWriterWrapper(multiprocessing.Process):
         self.wclass = wclass
         self.wparams = wparams
         self.format = wparams.get("format", "png256")
+        self.skipEmpty = wparams.get("skipEmpty", True)
         self.queue = multiprocessing.Queue(maxsize=100)
         self.daemon = True
         self.start()
@@ -279,14 +307,15 @@ class ThreadedWriterWrapper(multiprocessing.Process):
         super().join()
 
 
-def multi_MBTilesWriter(threads, filename, setname, overlay=False, version=1, description=None, format="png256"):
+def multi_MBTilesWriter(threads, filename, setname, overlay=False, version=1, description=None, format="png256", skipEmpty=True):
     params = {
         "filename": filename,
         "setname": setname,
         "overlay": overlay,
         "version": version,
         "description": description,
-        "format": format
+        "format": format,
+        "skipEmpty": skipEmpty
     }
     if threads == 1:
         return MBTilesWriter(**params)
@@ -584,6 +613,7 @@ def main():
     apg_other.add_argument("--scale", type=float, default=1.0, help="scale factor for HiDpi tiles (affects tile size)")
     apg_other.add_argument("--threads", type=int, metavar="N", help="number of threads (default: 2)", default=2)
     apg_other.add_argument("--skip-existing", action="store_true", default=False, help="do not overwrite existing files")
+    apg_other.add_argument("--skip-empty", action="store_true", default=False, help="do not store empty tiles")
     apg_other.add_argument("--fonts", help="directory with custom fonts for the style")
     apg_other.add_argument("--for-renderd", action="store_true", default=False, help="produce only a single tile for metatiles")
     apg_other.add_argument("-q", "--quiet", dest="verbose", action="store_false", help="do not print any information", default=True)
@@ -599,15 +629,17 @@ def main():
     # custom fonts
     if options.fonts:
         mapnik.register_fonts(options.fonts)
+
     # writer
     if options.tiledir:
-        writer = FileWriter(options.tiledir, format=options.format, tms=options.tms, overwrite=not options.skip_existing)
+        writer = FileWriter(options.tiledir, format=options.format, tms=options.tms, overwrite=not options.skip_existing, skipEmpty=options.skip_empty)
     elif HAS_SQLITE and options.mbtiles:
-        writer = multi_MBTilesWriter(options.threads, options.mbtiles, options.name, overlay=options.overlay, format=options.format)
+        writer = multi_MBTilesWriter(options.threads, options.mbtiles, options.name, overlay=options.overlay, format=options.format, skipEmpty=options.skip_empty)
     elif options.export:
         writer = ListWriter(options.export)
     else:
-        writer = FileWriter(os.getcwd() + "/tiles", format=options.format, tms=options.tms, overwrite=not options.skip_existing)
+        writer = FileWriter(os.getcwd() + "/tiles", format=options.format, tms=options.tms, overwrite=not options.skip_existing, skipEmpty=options.skip_empty)
+
     # input and process
     poly = None
     if options.bbox:
