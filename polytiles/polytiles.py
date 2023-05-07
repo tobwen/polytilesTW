@@ -204,6 +204,7 @@ class MBTilesWriter:
         return False
 
     def close(self):
+        self.con.commit()
         self.cur.execute("ANALYZE;")
         self.cur.execute("VACUUM;")
         self.cur.close()
@@ -227,29 +228,29 @@ class ThreadedWriterWrapper(multiprocessing.Process):
         super(ThreadedWriterWrapper, self).__init__()
         self.wclass = wclass
         self.wparams = wparams
-        self.format = wparams["format"] if "format" in wparams else "png256"
-        (self.p_pipe, self.pipe) = multiprocessing.Pipe()
+        self.format = wparams.get("format", "png256")
+        self.queue = multiprocessing.Queue(maxsize=100)
         self.daemon = True
         self.start()
-        (self.ni, self.desc) = self.p_pipe.recv()
+        self.ni, self.desc = self.queue.get(block=True, timeout=15)
 
     def __str__(self):
-        return "Threaded{0}".format(self.desc)
+        return "Threaded{}".format(self.desc)
 
     def run(self):
-        writerConstr = globals()[self.wclass]
+        writerConstr = globals().get(self.wclass)
         if not writerConstr:
             return
         writer = writerConstr(**self.wparams)
         need_image = writer.need_image()
-        self.pipe.send((need_image, str(writer)))
+        self.queue.put((need_image, str(writer)))
         while True:
-            req, args = self.pipe.recv()
+            req, args = self.queue.get()
             if req == "close":
                 break
-            if req == "write_poly":
+            elif req == "write_poly":
                 writer.write_poly(args)
-            if req == "write":
+            elif req == "write":
                 if need_image:
                     writer.write(args[0], args[1], args[2], args[3])
                 else:
@@ -257,14 +258,14 @@ class ThreadedWriterWrapper(multiprocessing.Process):
         writer.close()
 
     def write_poly(self, poly):
-        self.p_pipe.send(("write_poly", poly))
+        self.queue.put(("write_poly", poly))
 
     @staticmethod
     def exists(x, y, z):
         return False
 
     def write(self, x, y, z, image):
-        self.p_pipe.send(("write", (x, y, z, FakeImage(image, self.format))))
+        self.queue.put(("write", (x, y, z, FakeImage(image, self.format))))
 
     def need_image(self):
         return self.ni
@@ -274,8 +275,8 @@ class ThreadedWriterWrapper(multiprocessing.Process):
         return True
 
     def close(self):
-        self.p_pipe.send(("close", None))
-        self.join()
+        self.queue.put(("close", None))
+        super().join()
 
 
 def multi_MBTilesWriter(threads, filename, setname, overlay=False, version=1, description=None, format="png256"):
@@ -496,17 +497,20 @@ def render_tiles_multithreaded(generator, mapfile, writer, num_threads=2, scale=
     logging.info("render_tiles_multithreaded(%s %s %s %s)", generator, mapfile, writer, num_threads)
     printLock = multiprocessing.Lock()
     queue = multiprocessing.JoinableQueue(32)
+
     renderers = {}
     for i in range(num_threads):
         renderer = RenderThread(writer, mapfile, queue, printLock, scale=scale, renderlist=renderlist)
         render_thread = multiprocessing.Process(target=renderer.loop)
         render_thread.start()
         renderers[i] = render_thread
+
     generator.generate(queue)
 
     # signal render threads to exit by sending empty request to queue
     for i in range(num_threads):
         queue.put(None)
+
     # wait for pending rendering jobs to complete
     queue.join()
     for i in range(num_threads):
@@ -516,8 +520,10 @@ def render_tiles_multithreaded(generator, mapfile, writer, num_threads=2, scale=
 def render_tiles(generator, mapfile, writer, num_threads=1, scale=1.0, renderlist=False):
     logging.info("render_tiles(%s %s %s)", generator, mapfile, writer)
     printLock = multiprocessing.Lock()
+
     queue = multiprocessing.JoinableQueue(0)
     generator.generate(queue)
+
     renderer = RenderThread(writer, mapfile, queue, printLock, scale=scale, renderlist=renderlist)
     queue.put(None)
     renderer.loop()
