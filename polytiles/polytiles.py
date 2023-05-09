@@ -380,7 +380,10 @@ class RenderThread:
             # load style XML
             mapnik.load_map(self.m, self.mapfile, True)
             # obtain <Map> projection
-            prj = mapnik.Projection(self.m.srs)
+            if hasattr(mapnik,'mapnik_version') and mapnik.mapnik_version() >= 300100:
+                prj = mapnik.ProjTransform(mapnik.Projection('epsg:4326'), mapnik.Projection(self.m.srs))
+            else:
+                prj = mapnik.Projection(self.m.srs)
         while True:
             # fetch a tile from the queue and render it
             task = self.q.get()
